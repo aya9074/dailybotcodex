@@ -1,229 +1,199 @@
-import Groq from "groq-sdk";
-import {
-  getTodayTask,
-  getTodayDayName,
-  getPostponedTask,
-  clearPostponedTask,
-} from "./schedule";
+# ai_context.py - Python версия с DeepSeek (основной) и Groq (резерв)
+import os
+import json
+import random
+import re
+from datetime import datetime, timedelta
+from typing import Dict, Any, List, Optional
 
-const groq = new Groq({
-  apiKey: process.env.GROQ_API_KEY,
-});
+from openai import OpenAI  # для DeepSeek
+from groq import Groq  # для резерва
 
-// ═══════════════════════════════════════════════════════════════
-// 🎯 НАСТРОЙКА ИИ — МЕНЯЙ ЭТО ПОД СВОИ ЦЕЛИ
-// ═══════════════════════════════════════════════════════════════
+# ========== ИНИЦИАЛИЗАЦИЯ ПРОВАЙДЕРОВ ==========
+DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY")
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 
-const MY_WORK_DESCRIPTION = `
-Я — Госпожа, веду Telegram-канал в нише фемдом и финдом. Контент — ноу-нюд.
-В постах обычно одна фотография: ножки, каблуки, взгляд сверху вниз, поза доминирования.
-В кружочках — короткие фразы: стою, показываю ножки, подмигиваю, говорю что-то властное.
-Посты бывают нескольких типов:
-- Унижение/доминирование — психологическое давление, напоминание о месте подчинённого
-- Финдом — требование денег, трибьюта, подарков
-- Привязанность/принадлежность — про зависимость от Госпожи, потребность в контроле
-- Посты-зазывалки — короткие, цепляющие, для привлечения новых рабов
-`;
+if not DEEPSEEK_API_KEY and not GROQ_API_KEY:
+    raise RuntimeError("Нужен хотя бы один API ключ: DEEPSEEK_API_KEY или GROQ_API_KEY")
 
-const MY_GOALS = `
-- Публиковать контент по расписанию
-- Делать разнообразный контент в рамках фемдом/финдом тематики
-- Привлекать новых подписчиков и монетизировать канал
-- Удерживать и разогревать аудиторию регулярными постами
-- Не повторяться — каждый пост и кружочек должен быть свежим
-`;
+# Основной клиент (DeepSeek)
+deepseek_client = None
+if DEEPSEEK_API_KEY:
+    deepseek_client = OpenAI(
+        api_key=DEEPSEEK_API_KEY,
+        base_url="https://api.deepseek.com"
+    )
 
-// ═══════════════════════════════════════════════════════════════
+# Резервный клиент (Groq)
+groq_client = None
+if GROQ_API_KEY:
+    groq_client = Groq(api_key=GROQ_API_KEY)
 
-async function callAI(systemPrompt: string, userPrompt: string): Promise<string | null> {
-  try {
-    const response = await groq.chat.completions.create({
-      model: process.env.GROQ_MODEL || "llama-3.1-70b-versatile",
-      messages: [
-        { role: "system", content: systemPrompt },
-        { role: "user", content: userPrompt },
-      ],
-      max_tokens: 500,
-      temperature: 0.9,
-    });
+# ========== ФУНКЦИЯ ВЫЗОВА ЛЮБОГО ИИ (с переключением) ==========
+def call_ai(system_prompt: str, user_prompt: str, max_tokens: int = 150, temperature: float = 0.85) -> Optional[str]:
+    """Пытается вызвать DeepSeek, если не выходит — Groq. Возвращает ответ или None."""
+    
+    # Сначала пробуем DeepSeek (основной)
+    if deepseek_client:
+        try:
+            response = deepseek_client.chat.completions.create(
+                model="deepseek-chat",
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt}
+                ],
+                max_tokens=max_tokens,
+                temperature=temperature,
+            )
+            return response.choices[0].message.content
+        except Exception as e:
+            print(f"⚠️ DeepSeek упал: {e}. Переключаюсь на Groq.")
+    
+    # Резерв — Groq
+    if groq_client:
+        try:
+            response = groq_client.chat.completions.create(
+                model=os.environ.get("GROQ_MODEL", "llama-3.1-70b-versatile"),
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt}
+                ],
+                max_tokens=max_tokens,
+                temperature=temperature,
+            )
+            return response.choices[0].message.content
+        except Exception as e:
+            print(f"❌ Groq тоже упал: {e}")
+    
+    return None
 
-    return response.choices[0]?.message?.content ?? null;
-  } catch (err) {
-    console.error("Groq call failed", err);
-    return null;
-  }
-}
+# ========== ХРАНИЛИЩЕ ДЛЯ ОБУЧЕНИЯ ==========
+LEARNING_COOKIE_FILE = "learning_cookie.json"
 
-// Сердечки для рандомного завершения сообщения
-const HEARTS = ["🩷", "🤍", "💛", "🧡", "💜", "🩵", "🤎", "💙"];
+def load_cookie() -> Dict[str, Any]:
+    if os.path.exists(LEARNING_COOKIE_FILE):
+        with open(LEARNING_COOKIE_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return {"facts": [], "preferences": [], "custom_responses": []}
 
-// Эмодзи под каждый день недели — ситуативные ассоциации
-const DAY_EMOJIS: Record<number, string> = {
-  0: "🌸",  // воскресенье — отдых, нежность
-  1: "☕",  // понедельник — запись контента, старт
-  2: "✍️",  // вторник — пост, письмо
-  3: "🌿",  // среда — свободный день, пауза
-  4: "🎬",  // четверг — кружочек, съёмка
-  5: "💅",  // пятница — зазывалка, уверенность
-  6: "👑",  // суббота — зазывалка, власть
-};
+def save_cookie(cookie: Dict[str, Any]):
+    with open(LEARNING_COOKIE_FILE, "w", encoding="utf-8") as f:
+        json.dump(cookie, f, ensure_ascii=False, indent=2)
 
-// Генерирует полное ежедневное сообщение
-export async function generateDailyMessage(): Promise<string> {
-  const dayName = getTodayDayName();
-  const todayTask = getTodayTask();
-  const postponed = getPostponedTask();
+def learn_from_text(text: str) -> str:
+    cookie = load_cookie()
+    response = call_ai(
+        system_prompt="Выдели из текста 1-2 ключевых факта о пользователе. Ответ короткий, 1 предложение максимум.",
+        user_prompt=text,
+        max_tokens=100,
+        temperature=0.7
+    )
+    if response:
+        cookie["facts"].append({"text": response, "timestamp": datetime.now().isoformat()})
+        if len(cookie["facts"]) > 50:
+            cookie["facts"] = cookie["facts"][-50:]
+        save_cookie(cookie)
+        return f"✅ Запомнила: {response}"
+    return "🤔 Не смогла выделить полезное из этого"
 
-  // Собираем список задач на сегодня
-  const tasks: string[] = [];
-  if (postponed) tasks.push(postponed);
-  if (todayTask) tasks.push(todayTask);
+def forget_old_info(days: int = 7) -> str:
+    cookie = load_cookie()
+    cutoff = datetime.now() - timedelta(days=days)
+    old_count = len(cookie["facts"])
+    cookie["facts"] = [f for f in cookie["facts"] if datetime.fromisoformat(f["timestamp"]) > cutoff]
+    cookie["preferences"] = [p for p in cookie["preferences"] if datetime.fromisoformat(p["timestamp"]) > cutoff]
+    save_cookie(cookie)
+    return f"🗑️ Удалила {old_count - len(cookie['facts'])} старых записей"
 
-  const postponedNote = postponed
-    ? `Вчера ты перенесла задачу "${postponed}" — сегодня её нужно закрыть.`
-    : "";
+# ========== ЖЁСТКАЯ ПОДДЕРЖКА ==========
+TOUGH_LOVE_PHRASES = [
+    "СЛУШАЙ СЮДА. Ты хочешь сделать — делай. Не хочешь — делай через силу. Всё.",
+    "Отмазки оставь при себе. Сядь и сделай. Через 10 минут меня не будет, а задача останется.",
+    "Ноюни не принимаются. Делай сейчас, потом поплачешь над результатом.",
+    "Хватит думать. Открой ноутбук и напиши хоть строчку. Я здесь, но делаешь это ты.",
+]
 
-  const tasksText =
-    tasks.length > 0
-      ? tasks.map((t, i) => `${i + 1}. ${t}`).join("\n")
-      : "Сегодня свободный день — можно отдохнуть или сделать что-то для души 🌿";
-
-  const systemPrompt = `Ты — персональный коуч для автора Telegram-канала.
-О ней: ${MY_WORK_DESCRIPTION.trim()}
-Её цели: ${MY_GOALS.trim()}
+def get_tough_love_response(user_message: str, context: str = "") -> str:
+    cookie = load_cookie()
+    user_facts = "\n".join([f["text"] for f in cookie["facts"][-5:]]) if cookie["facts"] else "Нет сохранённых фактов"
+    
+    system_prompt = f"""Ты — жёсткий, но заботливый друг-коуч. Заёбывай пользователя, чтобы он делал дела.
+    
+О пользователе: {user_facts}
 
 Правила:
-- Пиши тепло и по-человечески, как будто знаешь её лично
-- Будь конкретным, без воды
-- Используй эмодзи уместно, 2-4 штуки на всё сообщение
-- Каждый раз формулируй по-новому, не повторяйся`;
+- Можно и нужно использовать грубые слова (блять, заебало, твою мать)
+- Пиши коротко, 1-2 предложения
+- ВСЕГДА заканчивай конкретным призывом к действию
+- Используй ЗАГЛАВНЫЕ буквы для удара"""
 
-  const userPrompt = `Сегодня ${dayName}.
-${postponedNote}
-Задачи на сегодня: ${tasks.length > 0 ? tasks.join(", ") : "свободный день"}.
+    user_prompt = f"Пользователь: {user_message}\nКонтекст: {context}\nОтветь коротко и жёстко."
 
-Напиши ТРИ отдельных блока (каждый с новой строки):
-1. Наводка для поста — конкретная идея или тема для поста сегодня (1 предложение в кавычках)
-2. Наводка для съёмки контента — конкретная идея для видео или кружочка (1 предложение в кавычках)
-3. Мотивация — короткая фраза про то, зачем она это делает: ради денег/себя/своего будущего (1-2 предложения)
-4. Совет на сегодня — практичный совет по работе с каналом (1-2 предложения)
+    response = call_ai(system_prompt, user_prompt, max_tokens=150, temperature=0.85)
+    if response:
+        return response
+    return random.choice(TOUGH_LOVE_PHRASES)
 
-Формат ответа строго такой (замени содержимое в скобках):
-ПОСТ: [идея для поста]
-КОНТЕНТ: [идея для съёмки]
-МОТИВАЦИЯ: [мотивационная фраза]
-СОВЕТ: [практичный совет]`;
+# ========== ОТЛОЖЕННЫЕ СООБЩЕНИЯ ==========
+SCHEDULED_FILE = "scheduled_messages.json"
 
-  const aiResult = await callAI(systemPrompt, userPrompt);
+def save_scheduled(chat_id: int, text: str, delay_minutes: int) -> str:
+    scheduled = []
+    if os.path.exists(SCHEDULED_FILE):
+        with open(SCHEDULED_FILE, "r") as f:
+            scheduled = json.load(f)
+    
+    send_at = (datetime.now() + timedelta(minutes=delay_minutes)).isoformat()
+    scheduled.append({
+        "chat_id": chat_id,
+        "text": text,
+        "send_at": send_at
+    })
+    
+    with open(SCHEDULED_FILE, "w") as f:
+        json.dump(scheduled, f, indent=2)
+    
+    return f"⏰ НАПОМНЮ ЧЕРЕЗ {delay_minutes} МИНУТ. А ТЫ ПОКА РАБОТАЙ."
 
-  // Парсим ответ ИИ
-  let postIdea = "пост про зависимость — они возвращаются снова и снова, потому что ты единственная, кто их принимает такими";
-  let contentIdea = "фото снизу вверх на каблуки, взгляд сверху вниз — классика доминирования, работает всегда";
-  let motivation = "ты делаешь это ради себя и своего будущего — каждый пост это вложение в свою свободу";
-  let tip = "не жди идеального настроения — сними кружочек прямо сейчас, живость важнее идеальности";
+def get_due_messages() -> List[Dict]:
+    if not os.path.exists(SCHEDULED_FILE):
+        return []
+    with open(SCHEDULED_FILE, "r") as f:
+        scheduled = json.load(f)
+    now = datetime.now()
+    due = [msg for msg in scheduled if datetime.fromisoformat(msg["send_at"]) <= now]
+    remaining = [msg for msg in scheduled if datetime.fromisoformat(msg["send_at"]) > now]
+    with open(SCHEDULED_FILE, "w") as f:
+        json.dump(remaining, f, indent=2)
+    return due
 
-  if (aiResult) {
-    const lines = aiResult.split("\n").filter(Boolean);
-    for (const line of lines) {
-      if (line.startsWith("ПОСТ:")) postIdea = line.replace("ПОСТ:", "").trim();
-      else if (line.startsWith("КОНТЕНТ:")) contentIdea = line.replace("КОНТЕНТ:", "").trim();
-      else if (line.startsWith("МОТИВАЦИЯ:")) motivation = line.replace("МОТИВАЦИЯ:", "").trim();
-      else if (line.startsWith("СОВЕТ:")) tip = line.replace("СОВЕТ:", "").trim();
-    }
-  }
+# ========== ЗАГЛУШКА КАЛЕНДАРЯ ==========
+def sync_with_calendar(chat_id: int) -> str:
+    return "📅 КАЛЕНДАРЬ ЕЩЁ ДЕЛАЮ. НО 'НАПОМНИ ЧЕРЕЗ X МИНУТ' УЖЕ РАБОТАЕТ, БЕЗ ОТМАЗОК."
 
-  // Очищаем перенесённую задачу после отправки
-  clearPostponedTask();
-
-  const dayEmoji = DAY_EMOJIS[new Date().getDay()];
-  const heart = HEARTS[Math.floor(Math.random() * HEARTS.length)];
-
-  // Собираем итоговое сообщение
-  const parts: string[] = [];
-
-  parts.push(`Привет! Сегодня ${dayName} ${dayEmoji}${postponed ? `, вчера ты перенесла задачу "${postponed}"` : ""}`);
-  parts.push(`\n📋 *План на сегодня:*\n${tasksText}`);
-  parts.push(`\n💡 Наводка для поста: "${postIdea}"`);
-  parts.push(`🎬 Наводка для съёмки контента: "${contentIdea}"`);
-  parts.push(`\n✨ ${motivation}`);
-  parts.push(`\n📌 Совет на сегодня: ${tip}`);
-  parts.push(`\nУдачи! ${heart}`);
-
-  return parts.join("\n");
-}
-
-// Углы для разнообразия идей постов
-const POST_ANGLES = [
-  "унижение через осознание слабости подчинённого",
-  "финдом — трибьют, подарок или денежное задание",
-  "психологическая привязанность к Госпоже",
-  "контроль и принадлежность — ты моя собственность",
-  "поклонение ножкам и каблукам",
-  "доминирование через уверенность и превосходство",
-  "желание заслужить внимание Госпожи",
-  "одиночество подчинённого и спасение через служение",
-  "игра на чувстве вины и потребности в наказании",
-  "зависимость — обычный секс больше не приносит удовольствия",
-];
-
-const PHOTO_ANGLES = [
-  "ножки/каблуки крупным планом с доминирующим ракурсом",
-  "взгляд сверху вниз в камеру — холодный и уверенный",
-  "поза власти: стоишь, руки на бёдрах, смотришь прямо",
-  "каблук на переднем плане, фокус снизу вверх",
-  "силуэт со спины — оборачиваешься через плечо",
-  "крупно: перчатка, цепочка, поводок или другой атрибут",
-  "ноги скрещены, сидишь сверху — взгляд в камеру",
-];
-
-const VIDEO_ANGLES = [
-  "властный взгляд в камеру + короткая фраза-приказ",
-  "медленно показываешь ножки/каблуки с уверенной интонацией",
-  "холодный взгляд сверху вниз, пауза, усмешка",
-  "подмигивание + провокационная фраза про слабость раба",
-  "стоишь спиной, медленно оборачиваешься — ни слова",
-  "смех Госпожи над ничтожностью подчинённого",
-  "короткий приказ с прямым взглядом в камеру",
-];
-
-// Генерирует идею для поста
-export async function generatePostIdea(): Promise<string> {
-  const angle = POST_ANGLES[Math.floor(Math.random() * POST_ANGLES.length)];
-  const result = await callAI(
-    `Ты — ассистент для создания контента в нише фемдом и финдом.
-Контекст: ${MY_WORK_DESCRIPTION.trim()}
-Отвечай коротко. Нужна только идея — не пиши готовый пост.`,
-    `Придумай одну идею для поста с углом: "${angle}".
-Что за крючок? Какую эмоцию или состояние это вызовет у читателя?
-Формат: 1-2 предложения — только суть идеи, без готового текста.`
-  );
-  return result ?? "Пост про момент, когда раб понимает, что уже не может уйти — зависимость сильнее воли. Напомни, что это нормально и ты это принимаешь.";
-}
-
-// Генерирует идею для съёмки контента (фото)
-export async function generateContentIdea(): Promise<string> {
-  const angle = PHOTO_ANGLES[Math.floor(Math.random() * PHOTO_ANGLES.length)];
-  const result = await callAI(
-    `Ты — ассистент для ноу-нюд фемдом фото-контента в Telegram.
-Контекст: ${MY_WORK_DESCRIPTION.trim()}
-Нужна только идея для фото — поза, детали, ракурс.`,
-    `Придумай идею для одной фотографии с углом: "${angle}".
-Поза, ракурс, детали кадра. Как это визуально передаёт доминирование?
-Формат: 1-2 предложения — только идея кадра, без текста поста.`
-  );
-  return result ?? "Фото снизу вверх: ноги в каблуках на переднем плане, взгляд сверху вниз в камеру — холодный и уверенный. Зритель автоматически чувствует себя внизу.";
-}
-
-// Генерирует идею для кружочка
-export async function generateVideoIdea(): Promise<string> {
-  const angle = VIDEO_ANGLES[Math.floor(Math.random() * VIDEO_ANGLES.length)];
-  const result = await callAI(
-    `Ты — ассистент для видео-кружочков в Telegram (до 60 сек) в нише фемдом.
-Контекст: ${MY_WORK_DESCRIPTION.trim()}
-Кружочки — живые, без монтажа. Нужна только идея.`,
-    `Придумай идею для кружочка с углом: "${angle}".
-Что происходит в кадре? С чего начать, что сделать или сказать?
-Формат: 1-2 предложения — только идея, без готового сценария.`
-  );
-  return result ?? "Стоишь, медленно смотришь в камеру снизу вверх — и говоришь одну фразу про то, что раб уже давно твой, просто ещё не признался себе. Никакого монтажа, только взгляд и голос.";
-}
+# ========== ГЛАВНАЯ ФУНКЦИЯ ==========
+def process_with_ai(user_message: str, chat_id: int) -> str:
+    msg_lower = user_message.lower()
+    
+    if msg_lower.startswith("обучись") or msg_lower.startswith("запомни"):
+        text_to_learn = re.sub(r"^(обучись|запомни)\s*", "", user_message).strip().strip('"')
+        if text_to_learn:
+            return learn_from_text(text_to_learn)
+        return "📝 Напиши после 'обучись:' текст, который я должна запомнить"
+    
+    if "напомни через" in msg_lower and "минут" in msg_lower:
+        match = re.search(r'через\s+(\d+)\s+минут', msg_lower)
+        if match:
+            minutes = int(match.group(1))
+            remaining = user_message[match.end():].strip()
+            if remaining:
+                return save_scheduled(chat_id, remaining, minutes)
+            return save_scheduled(chat_id, "Ты просил напомнить (без текста)", minutes)
+    
+    if "забудь старое" in msg_lower or "очисти память" in msg_lower:
+        return forget_old_info()
+    
+    if "календарь" in msg_lower:
+        return sync_with_calendar(chat_id)
+    
+    return get_tough_love_response(user_message)
