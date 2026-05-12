@@ -1,15 +1,13 @@
 # main.py
-# main.py
 import logging
 import time
 from typing import Optional
 
 import requests
 
-from ai_context import process_with_ai
-from reminders import render_reminders, add_reminder, delete_reminder
+from ai_parser import process_with_ai
+from reminders import render_reminders
 from bot_texts import (
-    EMOJI,
     help_text,
     ping_text,
     random_loading_phrase,
@@ -35,7 +33,6 @@ class TelegramClient:
         payload = {"timeout": TELEGRAM_POLL_TIMEOUT, "allowed_updates": ["message"]}
         if offset is not None:
             payload["offset"] = offset
-
         response = requests.get(
             f"{self.base_url}/getUpdates",
             params=payload,
@@ -55,15 +52,14 @@ class TelegramClient:
 def handle_message(message_text: str, chat_id: int) -> str:
     msg = message_text.strip()
     
-    # === ПАРОЛЬ ===
+    # Парольная защита
     if not is_authorized(chat_id):
         if msg == BOT_PASSWORD:
             authorize_user(chat_id, msg, BOT_PASSWORD)
-            return f"✅ Доступ разрешён. Добро пожаловать, Госпожа! {EMOJI.get('crown', '👑')}"
-        else:
-            return f"🔒 Доступ запрещён. Введи пароль."
-
-    # === КОМАНДЫ /something ===
+            return "✅ Доступ разрешён. Добро пожаловать, Госпожа!"
+        return "🔒 Доступ запрещён. Введи пароль."
+    
+    # Команды /something
     if msg.startswith("/"):
         cmd = msg.split()[0].lower()
         if cmd == "/start":
@@ -76,24 +72,24 @@ def handle_message(message_text: str, chat_id: int) -> str:
             return render_reminders()
         return unknown_command_text()
     
-    # === AI-обработка (DeepSeek/Groq + напоминания) ===
+    # Основная AI-обработка
     ai_result = process_with_ai(msg, chat_id)
     if ai_result:
         return ai_result
     
-    # === Если AI не ответил — показываем мотивацию и список напоминаний ===
+    # Если AI не ответил
     return f"{random_loading_phrase()}\n\n{render_reminders()}"
 
 def run():
     tg = TelegramClient(TELEGRAM_BOT_TOKEN)
     offset: Optional[int] = None
-    logger.info("🔥 Бот запущен на Digital Ocean (DeepSeek + пароль)")
+    logger.info("🔥 Бот запущен (пароль + AI)")
 
     while True:
         try:
             data = tg.get_updates(offset=offset)
             if not data.get("ok"):
-                logger.warning("Telegram ошибка: %s", data)
+                logger.warning("Telegram ошибка")
                 time.sleep(2)
                 continue
 
@@ -102,20 +98,15 @@ def run():
                 message = item.get("message")
                 if not message:
                     continue
-                
                 chat_id = message.get("chat", {}).get("id")
                 text = message.get("text")
                 if not chat_id or text is None:
                     continue
-                
                 response = handle_message(str(text), int(chat_id))
                 tg.send_message(int(chat_id), response)
 
-        except requests.RequestException as err:
-            logger.error("Ошибка сети: %s", err)
-            time.sleep(3)
-        except Exception:
-            logger.exception("Неожиданная ошибка")
+        except Exception as e:
+            logger.error(f"Ошибка: {e}")
             time.sleep(3)
 
 if __name__ == "__main__":
