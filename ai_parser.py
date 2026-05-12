@@ -1,4 +1,4 @@
-# ai_context.py - Python версия с DeepSeek (основной) и Groq (резерв)
+# ai_parser.py - Python версия с DeepSeek (основной) и Groq (резерв)
 import os
 import json
 import random
