@@ -1,10 +1,12 @@
+# main.py
 import logging
 import time
 from typing import Optional
 
 import requests
 
-from ai_parser import parse_command
+# ТВОИ МОДУЛИ
+from ai_context import process_with_ai  # <--- ТЕПЕРЬ ЭТО ПИТОН (DeepSeek)
 from reminders import add_reminder, delete_reminder, render_reminders
 from bot_texts import (
     EMOJI,
@@ -14,15 +16,17 @@ from bot_texts import (
     start_text,
     unknown_command_text,
 )
-from config import TELEGRAM_BOT_TOKEN, TELEGRAM_POLL_TIMEOUT
+from config import TELEGRAM_BOT_TOKEN, TELEGRAM_POLL_TIMEOUT, BOT_PASSWORD
+from auth import is_authorized, authorize_user
 
+# === НАСТРОЙКА ЛОГОВ ===
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(message)s",
 )
 logger = logging.getLogger("daily_bot")
 
-
+# === ТЕЛЕГРАМ КЛИЕНТ ===
 class TelegramClient:
     def __init__(self, token: str):
         if not token:
@@ -51,57 +55,46 @@ class TelegramClient:
         response.raise_for_status()
 
 
-def handle_message(message_text: str) -> str:
-    """Обрабатывает сообщение от пользователя и возвращает ответ"""
-    message_text = message_text.strip()
+# === ЛОГИКА ОТВЕТОВ (С ПАРОЛЕМ) ===
+def handle_message(message_text: str, chat_id: int) -> str:
+    msg = message_text.strip()
 
+    # 1️⃣ ЕСЛИ ЮЗЕР НЕ В ПУЛЕ — ТРЕБУЕМ ПАРОЛЬ
+    if not is_authorized(chat_id):
+        if msg == BOT_PASSWORD:
+            authorize_user(chat_id, msg, BOT_PASSWORD)
+            return f"✅ Доступ разрешён. Добро пожаловать, Госпожа! Жду команды. {EMOJI['crown']}"
+        else:
+            return f"🔒 Доступ запрещён. Введи пароль, чтобы использовать бота."
+
+    # 2️⃣ ДАЛЬШЕ ИДЁТ ПОЛНОЦЕННАЯ РАБОТА
     # Команды /something
-    if message_text.startswith("/"):
-        command = message_text.split()[0].lower()
-        if command == "/start":
+    if msg.startswith("/"):
+        cmd = msg.split()[0].lower()
+        if cmd == "/start":
             return start_text()
-        if command == "/ping":
+        if cmd == "/ping":
             return ping_text()
-        if command in {"/help", "/commands"}:
+        if cmd in {"/help", "/commands"}:
             return help_text()
-        if command == "/status":
+        if cmd == "/status":
             return render_reminders()
         return unknown_command_text()
 
-    # AI-парсинг для напоминаний
-    command = parse_command(message_text)
-    action = command.get("action")
+    # 3️⃣ AI-ПАРСИНГ через твой обновлённый ai_context (DeepSeek)
+    ai_result = process_with_ai(msg, chat_id)
+    if ai_result:
+        return ai_result
 
-    if action == "ADD_REMINDER":
-        text = command.get("text", "").strip()
-        if not text:
-            return f"{EMOJI['search']} Не вижу текста для напоминания. Напиши: добавь в напоминания ..."
-        reminder_id = add_reminder(text)
-        return f"{EMOJI['ok']} Напоминание #{reminder_id} добавлено\n\n{render_reminders()}"
-
-    if action == "DELETE_REMINDER":
-        try:
-            reminder_id = int(command.get("id", 0))
-        except (ValueError, TypeError):
-            reminder_id = 0
-        if reminder_id <= 0:
-            return f"{EMOJI['search']} Укажи номер для удаления. Пример: удали напоминание 2"
-        deleted = delete_reminder(reminder_id)
-        if deleted:
-            return f"{EMOJI['delete']} Напоминание #{reminder_id} удалено\n\n{render_reminders()}"
-        return f"{EMOJI['search']} Напоминание #{reminder_id} не найдено\n\n{render_reminders()}"
-
-    if action == "LIST_REMINDERS":
-        return render_reminders()
-
-    # Обычное сообщение — показываем вдохновение + список напоминаний
+    # 4️⃣ Если AI ничего не вернул — стандартный ответ + список напоминаний
     return f"{random_loading_phrase()}\n\n{render_reminders()}"
 
 
+# === ОСНОВНОЙ ЦИКЛ ===
 def run():
     tg = TelegramClient(TELEGRAM_BOT_TOKEN)
     offset: Optional[int] = None
-    logger.info("Бот запущен (long polling)")
+    logger.info("🔥 Бот запущен (Long Polling) с DeepSeek и паролем")
 
     while True:
         try:
@@ -124,7 +117,7 @@ def run():
                 if not chat_id or text is None:
                     continue
 
-                response = handle_message(str(text))
+                response = handle_message(str(text), int(chat_id))
                 tg.send_message(int(chat_id), response)
 
         except requests.RequestException as err:
