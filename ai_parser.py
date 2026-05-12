@@ -37,7 +37,7 @@ def call_ai(system_prompt: str, user_prompt: str, max_tokens: int = 150, tempera
     if deepseek_client:
         try:
             response = deepseek_client.chat.completions.create(
-                model="deepseek-chat",
+                model="deepseek-v4-flash",
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt}
