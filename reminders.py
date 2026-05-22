@@ -1,4 +1,3 @@
-# reminders.py
 from typing import Dict, List, Tuple
 from storage import load_reminders, save_reminders
 
@@ -23,10 +22,10 @@ def delete_reminder(reminder_id: int) -> bool:
     """Удаляет напоминание по ID. Возвращает True, если удалилось"""
     payload = load_reminders()
     key = str(reminder_id)
-    
+
     if key not in payload:
         return False
-    
+
     del payload[key]
     save_reminders(payload)
     return True
@@ -40,12 +39,12 @@ def list_reminders() -> List[Reminder]:
 def render_reminders() -> str:
     """Возвращает красивое текстовое представление напоминаний для отправки в Telegram"""
     reminders = list_reminders()
-    
+
     if not reminders:
         return "📌 Активных напоминаний нет"
-    
+
     lines = ["📌 *Активные напоминания:*"]
     for rid, text in reminders:
         lines.append(f"{rid}. {text}")
-    
+
     return "\n".join(lines)
